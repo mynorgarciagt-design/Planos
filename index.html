@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Planos</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #ffffff;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    color: #222222;
+  }
+
+  /* TOOLBAR */
+  #toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: #f4f4f4;
+    border-bottom: 1px solid #ddd;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .tool-group {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .tool-btn {
+    background: #ffffff;
+    border: 1.5px solid #ccc;
+    color: #444;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+
+  .tool-btn:active, .tool-btn.active {
+    background: #3355cc;
+    border-color: #2244aa;
+    color: #fff;
+  }
+
+  .tool-btn.danger:active {
+    background: #cc2233;
+    border-color: #aa1122;
+    color: #fff;
+  }
+
+  .separator {
+    width: 1px;
+    height: 28px;
+    background: #ddd;
+  }
+
+  #zoom-label {
+    font-size: 12px;
+    color: #888;
+    min-width: 42px;
+    text-align: center;
+  }
+
+  /* STATUS BAR */
+  #status {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #ffffffee;
+    border: 1px solid #ccc;
+    border-radius: 20px;
+    padding: 6px 18px;
+    font-size: 13px;
+    color: #555;
+    pointer-events: none;
+    z-index: 100;
+    white-space: nowrap;
+    backdrop-filter: blur(6px);
+  }
+
+  /* WALL COUNT */
+  #wall-info {
+    position: fixed;
+    top: 62px;
+    right: 14px;
+    background: #ffffffee;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #666;
+    z-index: 100;
+    min-width: 130px;
+    backdrop-filter: blur(6px);
+    line-height: 1.8;
+  }
+
+  #wall-info strong {
+    color: #3355cc;
+    display: block;
+    margin-bottom: 4px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* CANVAS */
+  #canvas-wrap {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    touch-action: none;
+  }
+
+  canvas {
+    position: absolute;
+    top: 0; left: 0;
+    touch-action: none;
+  }
+
+  /* UNDO HINT */
+  .hint {
+    font-size: 11px;
+    color: #50507a;
+    padding-left: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="tool-group">
+    <button class="tool-btn active" id="btn-wall" ontouchend="setTool('wall',event)" onclick="setTool('wall',event)">✏️ Pared</button>
+    <button class="tool-btn" id="btn-pan" ontouchend="setTool('pan',event)" onclick="setTool('pan',event)">✋ Mover</button>
+    <button class="tool-btn" id="btn-erase" ontouchend="setTool('erase',event)" onclick="setTool('erase',event)">🗑 Borrar</button>
+  </div>
+  <div class="separator"></div>
+  <div class="tool-group">
+    <button class="tool-btn" ontouchend="zoomIn(event)" onclick="zoomIn(event)">＋</button>
+    <span id="zoom-label">100%</span>
+    <button class="tool-btn" ontouchend="zoomOut(event)" onclick="zoomOut(event)">－</button>
+    <button class="tool-btn" ontouchend="resetView(event)" onclick="resetView(event)">⊡ Reset</button>
+  </div>
+  <div class="separator"></div>
+  <div class="tool-group">
+    <button class="tool-btn danger" ontouchend="clearAll(event)" onclick="clearAll(event)">🗑 Limpiar</button>
+    <button class="tool-btn" ontouchend="undoWall(event)" onclick="undoWall(event)">↩ Deshacer</button>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+</div>
+
+<div id="wall-info">
+  <strong>Paredes</strong>
+  <span id="wall-count">0 paredes</span><br>
+  <span id="total-meters">Total: 0.0 m</span>
+</div>
+
+<div id="status">Arrastrá para dibujar una pared</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const wrap = document.getElementById('canvas-wrap');
+
+// STATE
+let walls = [];
+let tool = 'wall';
+let zoom = 1;
+let panX = 0, panY = 0;
+
+// Drawing state
+let drawing = false;
+let drawStart = null;
+let drawCurrent = null;
+
+// Pan state
+let panning = false;
+let panStart = null;
+let panOrigin = null;
+
+// Erase hover
+let eraseHover = -1;
+
+// Grid
+const CELL = 40; // px at zoom=1 → 1 cell = 1 metro
+const SUBCELLS = 10; // subdivisiones por metro = 10cm cada una
+const SNAP_UNIT = CELL / SUBCELLS; // snap cada 10cm = 4px at zoom=1
+const WALL_THICKNESS = 6;
+
+// ─── RESIZE ──────────────────────────────────────────────
+function resize() {
+  canvas.width = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  render();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── TOOL ────────────────────────────────────────────────
+function setTool(t, e) {
+  if (e) { e.preventDefault(); e.stopPropagation(); }
+  tool = t;
+  document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + t)?.classList.add('active');
+  eraseHover = -1;
+  updateStatus();
+  render();
+}
+
+function updateStatus() {
+  const el = document.getElementById('status');
+  if (tool === 'wall') el.textContent = 'Arrastrá para dibujar una pared';
+  else if (tool === 'pan') el.textContent = 'Arrastrá para mover el plano';
+  else if (tool === 'erase') el.textContent = 'Tocá una pared para borrarla';
+}
+
+// ─── COORD HELPERS ───────────────────────────────────────
+function screenToWorld(sx, sy) {
+  return {
+    x: (sx - panX) / zoom,
+    y: (sy - panY) / zoom
+  };
+}
+
+function snap(val) {
+  return Math.round(val / SNAP_UNIT) * SNAP_UNIT;
+}
+
+function snapPoint(wx, wy) {
+  return { x: snap(wx), y: snap(wy) };
+}
+
+function worldToScreen(wx, wy) {
+  return {
+    x: wx * zoom + panX,
+    y: wy * zoom + panY
+  };
+}
+
+// ─── DISTANCE POINT TO SEGMENT ───────────────────────────
+function distPointSeg(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const lenSq = dx*dx + dy*dy;
+  if (lenSq === 0) return Math.hypot(px-ax, py-ay);
+  let t = ((px-ax)*dx + (py-ay)*dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
+}
+
+// ─── WALL HELPERS ─────────────────────────────────────────
+function wallLength(w) {
+  const dx = w.x2 - w.x1, dy = w.y2 - w.y1;
+  return Math.hypot(dx, dy) / CELL; // metros (puede tener decimales de 10cm)
+}
+
+function formatLength(meters) {
+  const totalCm = Math.round(meters * 100);
+  const m = Math.floor(totalCm / 100);
+  const cm = totalCm % 100;
+  if (cm === 0) return m + '.00 m';
+  return m + '.' + String(cm).padStart(2, '0') + ' m';
+}
+
+function updateWallInfo() {
+  const count = walls.length;
+  const total = walls.reduce((s, w) => s + wallLength(w), 0);
+  document.getElementById('wall-count').textContent = count + (count === 1 ? ' pared' : ' paredes');
+  document.getElementById('total-meters').textContent = 'Total: ' + formatLength(total);
+}
+
+// ─── ZOOM ────────────────────────────────────────────────
+function setZoom(z, cx, cy) {
+  cx = cx ?? canvas.width / 2;
+  cy = cy ?? canvas.height / 2;
+  const prev = zoom;
+  zoom = Math.max(0.2, Math.min(4, z));
+  panX = cx - (cx - panX) * (zoom / prev);
+  panY = cy - (cy - panY) * (zoom / prev);
+  document.getElementById('zoom-label').textContent = Math.round(zoom * 100) + '%';
+  render();
+}
+
+function zoomIn(e) { if(e){e.preventDefault();e.stopPropagation();} setZoom(zoom * 1.25); }
+function zoomOut(e) { if(e){e.preventDefault();e.stopPropagation();} setZoom(zoom / 1.25); }
+function resetView(e) {
+  if(e){e.preventDefault();e.stopPropagation();}
+  zoom = 1; panX = canvas.width/2 - 20*CELL/2; panY = canvas.height/2 - 15*CELL/2;
+  document.getElementById('zoom-label').textContent = '100%';
+  render();
+}
+
+// ─── UNDO / CLEAR ────────────────────────────────────────
+function undoWall(e) {
+  if(e){e.preventDefault();e.stopPropagation();}
+  walls.pop();
+  updateWallInfo();
+  render();
+}
+function clearAll(e) {
+  if(e){e.preventDefault();e.stopPropagation();}
+  if (walls.length === 0) return;
+  if (confirm('¿Borrar todo el plano?')) { walls = []; updateWallInfo(); render(); }
+}
+
+// ─── PINCH ZOOM ──────────────────────────────────────────
+let lastPinchDist = null;
+let lastPinchMid = null;
+
+function pinchDist(t) {
+  return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+}
+function pinchMid(t) {
+  const r = wrap.getBoundingClientRect();
+  return {
+    x: (t[0].clientX + t[1].clientX)/2 - r.left,
+    y: (t[0].clientY + t[1].clientY)/2 - r.top
+  };
+}
+
+// ─── TOUCH EVENTS ────────────────────────────────────────
+canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+
+function getTouchPos(touch) {
+  const r = canvas.getBoundingClientRect();
+  return { x: touch.clientX - r.left, y: touch.clientY - r.top };
+}
+
+function onTouchStart(e) {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    // Pinch start — cancel any drawing
+    drawing = false; panning = false;
+    lastPinchDist = pinchDist(e.touches);
+    lastPinchMid = pinchMid(e.touches);
+    return;
+  }
+  const pos = getTouchPos(e.touches[0]);
+  handlePointerDown(pos.x, pos.y);
+}
+
+function onTouchMove(e) {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    const d = pinchDist(e.touches);
+    const m = pinchMid(e.touches);
+    if (lastPinchDist) {
+      setZoom(zoom * (d / lastPinchDist), m.x, m.y);
+    }
+    lastPinchDist = d;
+    lastPinchMid = m;
+    return;
+  }
+  const pos = getTouchPos(e.touches[0]);
+  handlePointerMove(pos.x, pos.y);
+}
+
+function onTouchEnd(e) {
+  e.preventDefault();
+  lastPinchDist = null;
+  if (e.touches.length > 0) return;
+  handlePointerUp();
+}
+
+// ─── MOUSE EVENTS ────────────────────────────────────────
+canvas.addEventListener('mousedown', e => {
+  const r = canvas.getBoundingClientRect();
+  handlePointerDown(e.clientX - r.left, e.clientY - r.top);
+});
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  handlePointerMove(e.clientX - r.left, e.clientY - r.top);
+});
+canvas.addEventListener('mouseup', handlePointerUp);
+canvas.addEventListener('mouseleave', handlePointerUp);
+
+// Scroll to zoom (desktop)
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const cx = e.clientX - r.left, cy = e.clientY - r.top;
+  setZoom(zoom * (e.deltaY < 0 ? 1.1 : 0.9), cx, cy);
+}, { passive: false });
+
+// ─── POINTER HANDLERS ────────────────────────────────────
+function handlePointerDown(sx, sy) {
+  if (tool === 'wall') {
+    const w = screenToWorld(sx, sy);
+    const s = snapPoint(w.x, w.y);
+    drawing = true;
+    drawStart = s;
+    drawCurrent = s;
+  } else if (tool === 'pan') {
+    panning = true;
+    panStart = { x: sx, y: sy };
+    panOrigin = { x: panX, y: panY };
+  } else if (tool === 'erase') {
+    // find closest wall in screen space
+    const hit = findWallAt(sx, sy);
+    if (hit >= 0) {
+      walls.splice(hit, 1);
+      updateWallInfo();
+      eraseHover = -1;
+      render();
+    }
+  }
+}
+
+function handlePointerMove(sx, sy) {
+  if (tool === 'wall' && drawing) {
+    const w = screenToWorld(sx, sy);
+    drawCurrent = snapPoint(w.x, w.y);
+    render();
+    // live status
+    const dx = drawCurrent.x - drawStart.x;
+    const dy = drawCurrent.y - drawStart.y;
+    const len = Math.hypot(dx, dy) / CELL;
+    if (len > 0) {
+      document.getElementById('status').textContent = '↔ ' + formatLength(len);
+    }
+  } else if (tool === 'pan' && panning) {
+    panX = panOrigin.x + (sx - panStart.x);
+    panY = panOrigin.y + (sy - panStart.y);
+    render();
+  } else if (tool === 'erase') {
+    const prev = eraseHover;
+    eraseHover = findWallAt(sx, sy);
+    if (eraseHover !== prev) render();
+  }
+}
+
+function handlePointerUp() {
+  if (tool === 'wall' && drawing) {
+    drawing = false;
+    if (drawStart && drawCurrent) {
+      const dx = drawCurrent.x - drawStart.x;
+      const dy = drawCurrent.y - drawStart.y;
+      if (Math.hypot(dx, dy) >= SNAP_UNIT * 0.9) { // min ~10cm
+        walls.push({ x1: drawStart.x, y1: drawStart.y, x2: drawCurrent.x, y2: drawCurrent.y });
+        updateWallInfo();
+      }
+    }
+    drawStart = null; drawCurrent = null;
+    updateStatus();
+    render();
+  } else if (panning) {
+    panning = false;
+  }
+}
+
+// ─── FIND WALL ───────────────────────────────────────────
+function findWallAt(sx, sy) {
+  const THRESH = 16; // px screen
+  let best = -1, bestD = THRESH;
+  for (let i = 0; i < walls.length; i++) {
+    const w = walls[i];
+    const a = worldToScreen(w.x1, w.y1);
+    const b = worldToScreen(w.x2, w.y2);
+    const d = distPointSeg(sx, sy, a.x, a.y, b.x, b.y);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// ─── RENDER ──────────────────────────────────────────────
+function render() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid
+  drawGrid(W, H);
+
+  // Walls
+  walls.forEach((w, i) => drawWall(w, i === eraseHover ? '#ee2233' : '#1a1a2a', false));
+
+  // Preview wall while drawing
+  if (drawing && drawStart && drawCurrent) {
+    const dx = drawCurrent.x - drawStart.x;
+    const dy = drawCurrent.y - drawStart.y;
+    if (Math.hypot(dx, dy) > 0) {
+      drawWall({ x1: drawStart.x, y1: drawStart.y, x2: drawCurrent.x, y2: drawCurrent.y }, '#3355cc', true);
+    }
+  }
+
+  // Snap dot when drawing
+  if (drawing && drawStart) {
+    const s = worldToScreen(drawStart.x, drawStart.y);
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#3355cc';
+    ctx.fill();
+  }
+}
+
+function drawGrid(W, H) {
+  const cellPx = CELL * zoom;           // px por metro
+  const subPx  = cellPx / SUBCELLS;    // px por 10cm
+
+  ctx.save();
+
+  // ── Subgrilla 10cm ──
+  if (subPx >= 6) {
+    const ox = ((panX % subPx) + subPx) % subPx;
+    const oy = ((panY % subPx) + subPx) % subPx;
+    ctx.strokeStyle = 'rgba(0,0,0,0.04)';
+    ctx.lineWidth = 0.4;
+    ctx.beginPath();
+    for (let x = ox; x <= W; x += subPx) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (let y = oy; y <= H; y += subPx) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+  }
+
+  // ── Grilla 1m ──
+  const ox1 = ((panX % cellPx) + cellPx) % cellPx;
+  const oy1 = ((panY % cellPx) + cellPx) % cellPx;
+  ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  for (let x = ox1; x <= W; x += cellPx) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = oy1; y <= H; y += cellPx) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  // ── Grilla 5m ──
+  const big = cellPx * 5;
+  const ox5 = ((panX % big) + big) % big;
+  const oy5 = ((panY % big) + big) % big;
+  ctx.strokeStyle = 'rgba(0,0,0,0.13)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = ox5; x <= W; x += big) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = oy5; y <= H; y += big) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  // ── Ejes ──
+  const ox0 = panX, oy0 = panY;
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 1.2;
+  if (ox0 >= 0 && ox0 <= W) {
+    ctx.beginPath(); ctx.moveTo(ox0, 0); ctx.lineTo(ox0, H); ctx.stroke();
+  }
+  if (oy0 >= 0 && oy0 <= H) {
+    ctx.beginPath(); ctx.moveTo(0, oy0); ctx.lineTo(W, oy0); ctx.stroke();
+  }
+
+  // ── Labels de metros ──
+  if (cellPx >= 20) {
+    const fontSize = Math.max(9, Math.min(11, cellPx * 0.26));
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.font = `${fontSize}px system-ui`;
+    const step = cellPx >= 28 ? 1 : 5;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (let x = ox1; x <= W; x += cellPx * step) {
+      const col = Math.round((x - panX) / cellPx);
+      if (col === 0) continue;
+      ctx.fillText(col + 'm', x, oy0 >= 0 && oy0 <= H - 14 ? oy0 + 2 : 2);
+    }
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let y = oy1; y <= H; y += cellPx * step) {
+      const row = Math.round((y - panY) / cellPx);
+      if (row === 0) continue;
+      ctx.fillText(row + 'm', ox0 >= 20 && ox0 <= W ? ox0 - 4 : W - 4, y);
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawWall(w, color, preview) {
+  const a = worldToScreen(w.x1, w.y1);
+  const b = worldToScreen(w.x2, w.y2);
+  const thickness = Math.max(3, WALL_THICKNESS * zoom);
+
+  ctx.save();
+
+  // Shadow
+  if (!preview) {
+    ctx.shadowColor = 'rgba(0,0,0,0.18)';
+    ctx.shadowBlur = 5;
+  }
+
+  // Wall line
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.strokeStyle = preview ? color + '99' : color;
+  ctx.lineWidth = thickness;
+  ctx.lineCap = 'round';
+  ctx.setLineDash(preview ? [8, 5] : []);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Endpoints
+  if (!preview) {
+    [a, b].forEach(p => {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, thickness / 2, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    });
+  }
+
+  // Length label
+  const dx = w.x2 - w.x1, dy = w.y2 - w.y1;
+  const len = Math.hypot(dx, dy) / CELL;
+  if (len >= 0.08) {
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    const perpX = -Math.sin(angle) * 14, perpY = Math.cos(angle) * 14;
+
+    ctx.save();
+    ctx.translate(mx + perpX, my + perpY);
+    ctx.rotate(angle);
+    if (Math.cos(angle) < 0) ctx.rotate(Math.PI);
+
+    const label = formatLength(len);
+    const fontSize = Math.max(10, Math.min(14, 12 * zoom));
+    ctx.font = `bold ${fontSize}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const tw = ctx.measureText(label).width + 8;
+    ctx.fillStyle = '#ffffffdd';
+    ctx.beginPath();
+    ctx.roundRect(-tw/2, -fontSize/2 - 2, tw, fontSize + 4, 4);
+    ctx.fill();
+
+    ctx.fillStyle = preview ? '#3355cc' : '#111';
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+// ─── INIT ────────────────────────────────────────────────
+resetView();
+updateStatus();
+</script>
+</body>
+</html>
